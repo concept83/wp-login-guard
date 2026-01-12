@@ -42,6 +42,12 @@ class WP_Login_Guard {
     }
     
     public function init() {
+        // Check for mobile verification FIRST (before login_init)
+        if (isset($_GET['wplg_verify'])) {
+            add_action('template_redirect', [$this, 'show_mobile_verification'], 1);
+            return;
+        }
+        
         // Intercept login page
         add_action('login_init', [$this, 'maybe_show_qr_login']);
         
@@ -114,7 +120,7 @@ class WP_Login_Guard {
         $ip_address = $_SERVER['REMOTE_ADDR'];
         $user_agent = $_SERVER['HTTP_USER_AGENT'];
         
-        $wpdb->insert(
+        $result = $wpdb->insert(
             $this->table_name,
             [
                 'token' => $token,
@@ -122,9 +128,16 @@ class WP_Login_Guard {
                 'ip_address' => $ip_address,
                 'user_agent' => $user_agent,
                 'created_at' => current_time('mysql'),
-                'expires_at' => date('Y-m-d H:i:s', strtotime('+5 minutes'))
+                'expires_at' => date('Y-m-d H:i:s', strtotime('+15 minutes'))
             ]
         );
+        
+        // TEMPORARY DEBUG
+        error_log('Token created: ' . $token);
+        error_log('Insert result: ' . ($result ? 'SUCCESS' : 'FAILED'));
+        if (!$result) {
+            error_log('DB Error: ' . $wpdb->last_error);
+        }
         
         return $token;
     }
@@ -135,10 +148,13 @@ class WP_Login_Guard {
     public function get_session($token) {
         global $wpdb;
         
+        $current_time = current_time('mysql');
+        
         return $wpdb->get_row(
             $wpdb->prepare(
-                "SELECT * FROM {$this->table_name} WHERE token = %s AND expires_at > NOW()",
-                $token
+                "SELECT * FROM {$this->table_name} WHERE token = %s AND expires_at > %s",
+                $token,
+                $current_time
             )
         );
     }
@@ -178,15 +194,15 @@ class WP_Login_Guard {
      * Intercept login page and show QR code
      */
     public function maybe_show_qr_login() {
-        // Skip if already verified or showing number selection
-        if (isset($_GET['wplg_verified']) || isset($_GET['wplg_select'])) {
-            return;
+        // Show number selection if verified
+        if (isset($_GET['wplg_select'])) {
+            $this->show_number_selection();
+            exit;
         }
         
-        // Skip if this is mobile verification request
-        if (isset($_GET['wplg_verify'])) {
-            $this->show_mobile_verification();
-            exit;
+        // Skip if final verification
+        if (isset($_GET['wplg_verified'])) {
+            return;
         }
         
         // Show QR code login page
@@ -214,19 +230,59 @@ class WP_Login_Guard {
     }
 
     /**
-     * Display mobile verification (placeholder for now)
+     * Display mobile verification page
      */
-    private function show_mobile_verification() {
-        echo '<h1>Mobile verification page - coming in Step 3!</h1>';
+    public function show_mobile_verification() {
+        $token = sanitize_text_field($_GET['wplg_verify']);
+        $session = $this->get_session($token);
+        
+        // REMOVE THIS DEBUG BLOCK:
+        // echo '<pre>';
+        // echo 'Token from URL: ' . $token . "\n";
+        // echo 'Session found: ';
+        // var_dump($session);
+        // echo '</pre>';
+        // exit;
+        
+        // Check if token is valid
+        if (!$session) {
+            wp_die(__('Invalid or expired verification code.', 'wplgngrd'));
+        }
+        
+        // Check if already used
+        if ($session->status !== 'pending') {
+            wp_die(__('This verification code has already been used.', 'wplgngrd'));
+        }
+        
+        // Generate random 4-digit number and store it
+        $verification_number = str_pad(rand(1000, 9999), 4, '0', STR_PAD_LEFT);
+        $this->update_session($token, [
+            'verification_number' => $verification_number
+        ]);
+        
+        // Display mobile verification template
+        include plugin_dir_path(__FILE__) . 'templates/mobile-verify.php';
+        
+        // Manually trigger scripts
+        do_action('login_enqueue_scripts');
+        wp_footer();
     }
 
     /**
      * Register REST API routes for polling
      */
     public function register_rest_routes() {
+        // Existing check-token route
         register_rest_route('wplgngrd/v1', '/check-token/(?P<token>[a-zA-Z0-9]+)', [
             'methods' => 'GET',
             'callback' => [$this, 'check_token_status'],
+            'permission_callback' => '__return_true'
+        ]);
+        
+        // New update-token route
+        register_rest_route('wplgngrd/v1', '/update-token/(?P<token>[a-zA-Z0-9]+)', [
+            'methods' => 'POST',
+            'callback' => [$this, 'update_token_status'],
             'permission_callback' => '__return_true'
         ]);
     }
@@ -268,6 +324,58 @@ class WP_Login_Guard {
                 'token' => $wplg_current_token
             ]);
         }
+    }
+
+    /**
+     * Update token status via REST API
+     */
+    public function update_token_status($request) {
+        $token = $request->get_param('token');
+        $body = json_decode($request->get_body(), true);
+        $status = sanitize_text_field($body['status']);
+        
+        $session = $this->get_session($token);
+        
+        if (!$session) {
+            return new WP_REST_Response(['error' => 'Invalid token'], 404);
+        }
+        
+        $this->update_session($token, ['status' => $status]);
+        
+        return new WP_REST_Response(['success' => true], 200);
+    }
+
+    /**
+     * Display number selection page
+     */
+    private function show_number_selection() {
+        $token = sanitize_text_field($_GET['token']);
+        $session = $this->get_session($token);
+        
+        if (!$session || $session->status !== 'confirmed') {
+            wp_die(__('Invalid session. Please start over.', 'wplgngrd'));
+        }
+        
+        $correct_number = $session->verification_number;
+        
+        // Generate 4 random decoy numbers (different from correct one)
+        $decoys = [];
+        while (count($decoys) < 4) {
+            $decoy = str_pad(rand(1000, 9999), 4, '0', STR_PAD_LEFT);
+            if ($decoy !== $correct_number && !in_array($decoy, $decoys)) {
+                $decoys[] = $decoy;
+            }
+        }
+        
+        // Combine and shuffle
+        $numbers = array_merge([$correct_number], $decoys);
+        shuffle($numbers);
+        
+        // Display number selection template
+        include plugin_dir_path(__FILE__) . 'templates/number-selection.php';
+        
+        do_action('login_enqueue_scripts');
+        wp_footer();
     }
 }
 
