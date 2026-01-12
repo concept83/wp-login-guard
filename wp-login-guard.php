@@ -194,15 +194,40 @@ class WP_Login_Guard {
      * Intercept login page and show QR code
      */
     public function maybe_show_qr_login() {
+        // Don't interfere if user is already logged in
+        if (is_user_logged_in()) {
+            return;
+        }
+        
+        // Don't interfere with login form submissions (POST requests)
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            return;
+        }
+        
+        // Don't interfere with logout, password reset, etc.
+        if (isset($_GET['action'])) {
+            return;
+        }
+        
         // Show number selection if verified
         if (isset($_GET['wplg_select'])) {
             $this->show_number_selection();
             exit;
         }
         
-        // Skip if final verification
+        // Allow normal login if verification passed
         if (isset($_GET['wplg_verified'])) {
-            return;
+            $token = sanitize_text_field($_GET['token']);
+            $session = $this->get_session($token);
+            
+            // Verify the session is confirmed and number was selected correctly
+            if ($session && $session->status === 'confirmed') {
+                // Mark as used so it can't be reused
+                $this->update_session($token, ['status' => 'used']);
+                
+                // Allow WordPress to show normal login form
+                return;
+            }
         }
         
         // Show QR code login page
