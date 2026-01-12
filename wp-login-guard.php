@@ -11,6 +11,12 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Load Composer autoloader
+require_once plugin_dir_path(__FILE__) . 'vendor/autoload.php';
+
+use Endroid\QrCode\QrCode;
+use Endroid\QrCode\Writer\PngWriter;
+
 class WP_Login_Guard {
     
     private static $instance = null;
@@ -36,7 +42,14 @@ class WP_Login_Guard {
     }
     
     public function init() {
-        // We'll add hooks here in next steps
+        // Intercept login page
+        add_action('login_init', [$this, 'maybe_show_qr_login']);
+        
+        // Register REST API endpoints
+        add_action('rest_api_init', [$this, 'register_rest_routes']);
+        
+        // Enqueue scripts on login page
+        add_action('login_enqueue_scripts', [$this, 'enqueue_login_scripts']);
     }
     
     /**
@@ -141,6 +154,120 @@ class WP_Login_Guard {
             $data,
             ['token' => $token]
         );
+    }
+
+    /**
+     * Generate QR code image as base64
+     */
+    public function generate_qr_code($token) {
+        $verify_url = add_query_arg([
+            'wplg_verify' => $token
+        ], home_url());
+        
+        $qrCode = QrCode::create($verify_url)
+            ->setSize(300)
+            ->setMargin(10);
+        
+        $writer = new PngWriter();
+        $result = $writer->write($qrCode);
+        
+        return $result->getDataUri();
+    }
+
+    /**
+     * Intercept login page and show QR code
+     */
+    public function maybe_show_qr_login() {
+        // Skip if already verified or showing number selection
+        if (isset($_GET['wplg_verified']) || isset($_GET['wplg_select'])) {
+            return;
+        }
+        
+        // Skip if this is mobile verification request
+        if (isset($_GET['wplg_verify'])) {
+            $this->show_mobile_verification();
+            exit;
+        }
+        
+        // Show QR code login page
+        $this->show_qr_login_page();
+        exit;
+    }
+
+    /**
+     * Display QR code login page
+     */
+    private function show_qr_login_page() {
+        // Create new session
+        $token = $this->create_session();
+        $qr_code = $this->generate_qr_code($token);
+        
+        // Make token available globally for script localization
+        global $wplg_current_token;
+        $wplg_current_token = $token;
+        
+        // Manually trigger login scripts hook
+        do_action('login_enqueue_scripts');
+        
+        // Display custom login page
+        include plugin_dir_path(__FILE__) . 'templates/qr-login.php';
+    }
+
+    /**
+     * Display mobile verification (placeholder for now)
+     */
+    private function show_mobile_verification() {
+        echo '<h1>Mobile verification page - coming in Step 3!</h1>';
+    }
+
+    /**
+     * Register REST API routes for polling
+     */
+    public function register_rest_routes() {
+        register_rest_route('wplgngrd/v1', '/check-token/(?P<token>[a-zA-Z0-9]+)', [
+            'methods' => 'GET',
+            'callback' => [$this, 'check_token_status'],
+            'permission_callback' => '__return_true'
+        ]);
+    }
+
+    /**
+     * Check token status via REST API
+     */
+    public function check_token_status($request) {
+        $token = $request->get_param('token');
+        $session = $this->get_session($token);
+        
+        if (!$session) {
+            return new WP_REST_Response(['status' => 'expired'], 404);
+        }
+        
+        return new WP_REST_Response([
+            'status' => $session->status,
+            'verification_number' => $session->verification_number
+        ], 200);
+    }
+
+    /**
+     * Enqueue JavaScript for polling
+     */
+    public function enqueue_login_scripts() {
+        global $wplg_current_token;
+        
+        if (!isset($_GET['wplg_select']) && !empty($wplg_current_token)) {
+            wp_enqueue_script(
+                'wplgngrd-login',
+                plugins_url('assets/js/login-polling.js', __FILE__),
+                ['jquery'],
+                '1.0.0',
+                true
+            );
+            
+            wp_localize_script('wplgngrd-login', 'wplgngrd', [
+                'ajax_url' => rest_url('wplgngrd/v1/check-token/'),
+                'token' => $wplg_current_token
+            ]);
+        }
     }
 }
 
