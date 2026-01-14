@@ -42,6 +42,11 @@ class WP_Login_Guard {
     }
 
     public function init() {
+        // Start session early
+        if (!session_id()) {
+            session_start();
+        }
+        
         // Check for mobile verification FIRST (before login_init)
         if (isset($_GET['wplg_verify'])) {
             add_action('template_redirect', [$this, 'show_mobile_verification'], 1);
@@ -63,9 +68,33 @@ class WP_Login_Guard {
         // Register settings
         add_action('admin_init', [$this, 'register_settings']);
         
-        // Auto-logout functionality
+        // Auto-logout functionality - use different hooks
         add_action('admin_init', [$this, 'check_auto_logout']);
         add_action('wp_login', [$this, 'set_login_timestamp']);
+        
+        // IMPORTANT: Don't update timestamp on heartbeat/ajax
+        add_action('admin_init', [$this, 'maybe_update_activity'], 1);
+    }
+
+    /**
+     * Update activity timestamp only on real page loads, not Ajax/Heartbeat
+     */
+    public function maybe_update_activity() {
+        // Skip if Ajax request
+        if (defined('DOING_AJAX') && DOING_AJAX) {
+            return;
+        }
+        
+        // Skip if Heartbeat
+        if (!empty($_POST['action']) && $_POST['action'] === 'heartbeat') {
+            return;
+        }
+        
+        // Real page load - update activity
+        if (is_user_logged_in()) {
+            $current_user = wp_get_current_user();
+            update_user_meta($current_user->ID, 'wplgngrd_last_activity', time());
+        }
     }
     
     /**
@@ -207,13 +236,21 @@ class WP_Login_Guard {
             return;
         }
         
-        // Don't interfere with POST requests (login form submissions)
-        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        // Don't interfere with logout, password reset, etc.
+        if (isset($_GET['action'])) {
             return;
         }
         
-        // Don't interfere with logout, password reset, etc.
-        if (isset($_GET['action'])) {
+        // SECURITY: For POST requests (login form submissions) - verify QR was completed
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            // Check if they completed QR verification
+            if (!isset($_SESSION['wplgngrd_verified']) || $_SESSION['wplgngrd_verified'] !== true) {
+                // Not verified - block the login attempt and redirect to QR page
+                wp_redirect(wp_login_url());
+                exit;
+            }
+            // Verified - clear the session flag and allow login to proceed
+            unset($_SESSION['wplgngrd_verified']);
             return;
         }
         
@@ -223,13 +260,15 @@ class WP_Login_Guard {
             exit;
         }
         
-        // Allow normal login if verification passed
+        // Complete verification and set session flag
         if (isset($_GET['wplg_verified'])) {
             $token = sanitize_text_field($_GET['token']);
             $session = $this->get_session($token);
             
             if ($session && $session->status === 'confirmed') {
                 $this->update_session($token, ['status' => 'used']);
+                // Set session flag that QR verification is complete
+                $_SESSION['wplgngrd_verified'] = true;
                 return;
             }
         }
@@ -417,17 +456,16 @@ class WP_Login_Guard {
             return;
         }
         
-        $auto_logout = get_option('wplgngrd_auto_logout', 0);
+        $auto_logout = (int) get_option('wplgngrd_auto_logout', 0);
         
         if ($auto_logout <= 0) {
-            return; // Auto-logout disabled
+            return;
         }
         
         $current_user = wp_get_current_user();
-        $last_activity = get_user_meta($current_user->ID, 'wplgngrd_last_activity', true);
+        $last_activity = (int) get_user_meta($current_user->ID, 'wplgngrd_last_activity', true);
         
         if (!$last_activity) {
-            // First time, set it
             update_user_meta($current_user->ID, 'wplgngrd_last_activity', time());
             return;
         }
@@ -436,14 +474,12 @@ class WP_Login_Guard {
         $inactive_time = time() - $last_activity;
         
         if ($inactive_time > $timeout_seconds) {
-            // User has been inactive too long - log them out
             wp_logout();
             wp_redirect(add_query_arg('wplg_timeout', '1', wp_login_url()));
             exit;
         }
         
-        // Update last activity timestamp
-        update_user_meta($current_user->ID, 'wplgngrd_last_activity', time());
+        // DON'T update timestamp here - let maybe_update_activity() handle it
     }
 
     /**
@@ -533,6 +569,7 @@ class WP_Login_Guard {
         ?>
         <select name="wplgngrd_auto_logout">
             <option value="0" <?php selected($auto_logout, 0); ?>><?php esc_html_e('Disabled', 'wplgngrd'); ?></option>
+            <option value="2" <?php selected($auto_logout, 2); ?>>2 <?php esc_html_e('minutes', 'wplgngrd'); ?></option>
             <option value="15" <?php selected($auto_logout, 15); ?>>15 <?php esc_html_e('minutes', 'wplgngrd'); ?></option>
             <option value="30" <?php selected($auto_logout, 30); ?>>30 <?php esc_html_e('minutes', 'wplgngrd'); ?></option>
             <option value="60" <?php selected($auto_logout, 60); ?>>1 <?php esc_html_e('hour', 'wplgngrd'); ?></option>
@@ -587,6 +624,16 @@ class WP_Login_Guard {
                 <li><?php esc_html_e('Desktop shows 5 numbers - user selects the correct one', 'wplgngrd'); ?></li>
                 <li><?php esc_html_e('User can now log in with their credentials', 'wplgngrd'); ?></li>
             </ol>
+            
+            <hr>
+            
+            <h2><?php esc_html_e('Security Features', 'wplgngrd'); ?></h2>
+            <ul>
+                <li><?php esc_html_e('Blocks direct POST attacks - bots cannot bypass QR verification', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('15-minute token expiry prevents replay attacks', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('One-time use tokens - each verification is unique', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('Session-based verification tracking', 'wplgngrd'); ?></li>
+            </ul>
             
             <hr>
             
