@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: WP Login Guard
- * Description: Two-factor QR code verification for WordPress login
+ * Description: Two-factor QR code verification for WordPress login with auto-logout
  * Version: 1.0.0
  * Author: Slawek Jurczyk
  * Text Domain: wplgngrd
@@ -40,7 +40,7 @@ class WP_Login_Guard {
         // Initialize plugin
         add_action('plugins_loaded', [$this, 'init']);
     }
-    
+
     public function init() {
         // Check for mobile verification FIRST (before login_init)
         if (isset($_GET['wplg_verify'])) {
@@ -56,6 +56,16 @@ class WP_Login_Guard {
         
         // Enqueue scripts on login page
         add_action('login_enqueue_scripts', [$this, 'enqueue_login_scripts']);
+        
+        // Admin menu
+        add_action('admin_menu', [$this, 'add_admin_menu']);
+        
+        // Register settings
+        add_action('admin_init', [$this, 'register_settings']);
+        
+        // Auto-logout functionality
+        add_action('admin_init', [$this, 'check_auto_logout']);
+        add_action('wp_login', [$this, 'set_login_timestamp']);
     }
     
     /**
@@ -89,7 +99,6 @@ class WP_Login_Guard {
      * Cleanup on deactivation
      */
     public function deactivate() {
-        // Optional: clean up old tokens
         $this->cleanup_expired_tokens();
     }
     
@@ -120,7 +129,7 @@ class WP_Login_Guard {
         $ip_address = $_SERVER['REMOTE_ADDR'];
         $user_agent = $_SERVER['HTTP_USER_AGENT'];
         
-        $result = $wpdb->insert(
+        $wpdb->insert(
             $this->table_name,
             [
                 'token' => $token,
@@ -131,13 +140,6 @@ class WP_Login_Guard {
                 'expires_at' => date('Y-m-d H:i:s', strtotime('+15 minutes'))
             ]
         );
-        
-        // TEMPORARY DEBUG
-        error_log('Token created: ' . $token);
-        error_log('Insert result: ' . ($result ? 'SUCCESS' : 'FAILED'));
-        if (!$result) {
-            error_log('DB Error: ' . $wpdb->last_error);
-        }
         
         return $token;
     }
@@ -194,12 +196,18 @@ class WP_Login_Guard {
      * Intercept login page and show QR code
      */
     public function maybe_show_qr_login() {
+        // Check if plugin is enabled
+        $enabled = get_option('wplgngrd_enabled', false);
+        if (!$enabled) {
+            return; // Plugin disabled, allow normal login
+        }
+        
         // Don't interfere if user is already logged in
         if (is_user_logged_in()) {
             return;
         }
         
-        // Don't interfere with login form submissions (POST requests)
+        // Don't interfere with POST requests (login form submissions)
         if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             return;
         }
@@ -220,12 +228,8 @@ class WP_Login_Guard {
             $token = sanitize_text_field($_GET['token']);
             $session = $this->get_session($token);
             
-            // Verify the session is confirmed and number was selected correctly
             if ($session && $session->status === 'confirmed') {
-                // Mark as used so it can't be reused
                 $this->update_session($token, ['status' => 'used']);
-                
-                // Allow WordPress to show normal login form
                 return;
             }
         }
@@ -261,14 +265,6 @@ class WP_Login_Guard {
         $token = sanitize_text_field($_GET['wplg_verify']);
         $session = $this->get_session($token);
         
-        // REMOVE THIS DEBUG BLOCK:
-        // echo '<pre>';
-        // echo 'Token from URL: ' . $token . "\n";
-        // echo 'Session found: ';
-        // var_dump($session);
-        // echo '</pre>';
-        // exit;
-        
         // Check if token is valid
         if (!$session) {
             wp_die(__('Invalid or expired verification code.', 'wplgngrd'));
@@ -294,17 +290,17 @@ class WP_Login_Guard {
     }
 
     /**
-     * Register REST API routes for polling
+     * Register REST API routes
      */
     public function register_rest_routes() {
-        // Existing check-token route
+        // Check token status
         register_rest_route('wplgngrd/v1', '/check-token/(?P<token>[a-zA-Z0-9]+)', [
             'methods' => 'GET',
             'callback' => [$this, 'check_token_status'],
             'permission_callback' => '__return_true'
         ]);
         
-        // New update-token route
+        // Update token status
         register_rest_route('wplgngrd/v1', '/update-token/(?P<token>[a-zA-Z0-9]+)', [
             'methods' => 'POST',
             'callback' => [$this, 'update_token_status'],
@@ -401,6 +397,203 @@ class WP_Login_Guard {
         
         do_action('login_enqueue_scripts');
         wp_footer();
+    }
+
+    /**
+     * Set login timestamp when user logs in
+     */
+    public function set_login_timestamp($user_login) {
+        $user = get_user_by('login', $user_login);
+        if ($user) {
+            update_user_meta($user->ID, 'wplgngrd_last_activity', time());
+        }
+    }
+
+    /**
+     * Check and enforce auto-logout
+     */
+    public function check_auto_logout() {
+        if (!is_user_logged_in()) {
+            return;
+        }
+        
+        $auto_logout = get_option('wplgngrd_auto_logout', 0);
+        
+        if ($auto_logout <= 0) {
+            return; // Auto-logout disabled
+        }
+        
+        $current_user = wp_get_current_user();
+        $last_activity = get_user_meta($current_user->ID, 'wplgngrd_last_activity', true);
+        
+        if (!$last_activity) {
+            // First time, set it
+            update_user_meta($current_user->ID, 'wplgngrd_last_activity', time());
+            return;
+        }
+        
+        $timeout_seconds = $auto_logout * 60;
+        $inactive_time = time() - $last_activity;
+        
+        if ($inactive_time > $timeout_seconds) {
+            // User has been inactive too long - log them out
+            wp_logout();
+            wp_redirect(add_query_arg('wplg_timeout', '1', wp_login_url()));
+            exit;
+        }
+        
+        // Update last activity timestamp
+        update_user_meta($current_user->ID, 'wplgngrd_last_activity', time());
+    }
+
+    /**
+     * Add admin menu page
+     */
+    public function add_admin_menu() {
+        add_options_page(
+            __('WP Login Guard Settings', 'wplgngrd'),
+            __('Login Guard', 'wplgngrd'),
+            'manage_options',
+            'wp-login-guard',
+            [$this, 'render_settings_page']
+        );
+    }
+
+    /**
+     * Register plugin settings
+     */
+    public function register_settings() {
+        register_setting('wplgngrd_settings', 'wplgngrd_enabled', [
+            'type' => 'boolean',
+            'default' => false,
+            'sanitize_callback' => 'rest_sanitize_boolean'
+        ]);
+        
+        register_setting('wplgngrd_settings', 'wplgngrd_auto_logout', [
+            'type' => 'integer',
+            'default' => 0,
+            'sanitize_callback' => 'absint'
+        ]);
+        
+        // Settings section
+        add_settings_section(
+            'wplgngrd_main_section',
+            __('Login Guard Configuration', 'wplgngrd'),
+            [$this, 'render_section_description'],
+            'wp-login-guard'
+        );
+        
+        // Enable/Disable field
+        add_settings_field(
+            'wplgngrd_enabled',
+            __('Enable Login Guard', 'wplgngrd'),
+            [$this, 'render_enabled_field'],
+            'wp-login-guard',
+            'wplgngrd_main_section'
+        );
+        
+        // Auto-logout field
+        add_settings_field(
+            'wplgngrd_auto_logout',
+            __('Auto-logout after inactivity', 'wplgngrd'),
+            [$this, 'render_auto_logout_field'],
+            'wp-login-guard',
+            'wplgngrd_main_section'
+        );
+    }
+
+    /**
+     * Render settings section description
+     */
+    public function render_section_description() {
+        echo '<p>' . esc_html__('Configure QR code verification and security settings for login.', 'wplgngrd') . '</p>';
+    }
+
+    /**
+     * Render enabled field
+     */
+    public function render_enabled_field() {
+        $enabled = get_option('wplgngrd_enabled', false);
+        ?>
+        <label>
+            <input type="checkbox" name="wplgngrd_enabled" value="1" <?php checked($enabled, true); ?> />
+            <?php esc_html_e('Enable QR code verification for all users', 'wplgngrd'); ?>
+        </label>
+        <p class="description">
+            <?php esc_html_e('When enabled, all users must verify with QR code before logging in.', 'wplgngrd'); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render auto-logout field
+     */
+    public function render_auto_logout_field() {
+        $auto_logout = get_option('wplgngrd_auto_logout', 0);
+        ?>
+        <select name="wplgngrd_auto_logout">
+            <option value="0" <?php selected($auto_logout, 0); ?>><?php esc_html_e('Disabled', 'wplgngrd'); ?></option>
+            <option value="15" <?php selected($auto_logout, 15); ?>>15 <?php esc_html_e('minutes', 'wplgngrd'); ?></option>
+            <option value="30" <?php selected($auto_logout, 30); ?>>30 <?php esc_html_e('minutes', 'wplgngrd'); ?></option>
+            <option value="60" <?php selected($auto_logout, 60); ?>>1 <?php esc_html_e('hour', 'wplgngrd'); ?></option>
+            <option value="120" <?php selected($auto_logout, 120); ?>>2 <?php esc_html_e('hours', 'wplgngrd'); ?></option>
+            <option value="240" <?php selected($auto_logout, 240); ?>>4 <?php esc_html_e('hours', 'wplgngrd'); ?></option>
+        </select>
+        <p class="description">
+            <?php esc_html_e('Automatically log out users after this period of inactivity. Disabled = never auto-logout.', 'wplgngrd'); ?>
+        </p>
+        <?php
+    }
+
+    /**
+     * Render settings page
+     */
+    public function render_settings_page() {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+        
+        // Check if settings were saved
+        if (isset($_GET['settings-updated'])) {
+            add_settings_error(
+                'wplgngrd_messages',
+                'wplgngrd_message',
+                __('Settings saved successfully.', 'wplgngrd'),
+                'success'
+            );
+        }
+        
+        settings_errors('wplgngrd_messages');
+        ?>
+        <div class="wrap">
+            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
+            
+            <form action="options.php" method="post">
+                <?php
+                settings_fields('wplgngrd_settings');
+                do_settings_sections('wp-login-guard');
+                submit_button(__('Save Settings', 'wplgngrd'));
+                ?>
+            </form>
+            
+            <hr>
+            
+            <h2><?php esc_html_e('How it works', 'wplgngrd'); ?></h2>
+            <ol>
+                <li><?php esc_html_e('User visits the login page and sees a QR code', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('User scans QR code with their mobile phone', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('Mobile shows a random 4-digit number', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('User clicks "Continue to Login" on mobile', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('Desktop shows 5 numbers - user selects the correct one', 'wplgngrd'); ?></li>
+                <li><?php esc_html_e('User can now log in with their credentials', 'wplgngrd'); ?></li>
+            </ol>
+            
+            <hr>
+            
+            <h2><?php esc_html_e('Auto-logout Feature', 'wplgngrd'); ?></h2>
+            <p><?php esc_html_e('When auto-logout is enabled, users will be automatically logged out after the specified period of inactivity. Activity is tracked on every page load in the admin area.', 'wplgngrd'); ?></p>
+        </div>
+        <?php
     }
 }
 
