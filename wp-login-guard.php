@@ -447,6 +447,16 @@ class WP_Login_Guard {
             exit;
         }
         
+        // CHECK IP BINDING
+        $desktop_ip = $session->ip_address;
+        $mobile_ip = $_SERVER['REMOTE_ADDR'];
+
+        $ip_check = $this->check_ip_binding($desktop_ip, $mobile_ip);
+
+        if (!$ip_check['allowed']) {
+            wp_die($ip_check['message'], __('Security Check Failed', 'wplgngrd'), ['response' => 403]);
+        }
+
         // Generate random 4-digit number and store it
         $verification_number = str_pad(rand(1000, 9999), 4, '0', STR_PAD_LEFT);
         $this->update_session($token, [
@@ -726,6 +736,19 @@ class WP_Login_Guard {
             'default' => 15,
             'sanitize_callback' => 'absint'
         ]);
+
+        // IP Binding settings
+        register_setting('wplgngrd_settings', 'wplgngrd_strict_ip', [
+            'type' => 'boolean',
+            'default' => false,
+            'sanitize_callback' => 'rest_sanitize_boolean'
+        ]);
+
+        register_setting('wplgngrd_settings', 'wplgngrd_ip_whitelist', [
+            'type' => 'string',
+            'default' => '',
+            'sanitize_callback' => [$this, 'sanitize_ip_whitelist']
+        ]);
         
         // Main section
         add_settings_section(
@@ -781,6 +804,30 @@ class WP_Login_Guard {
             [$this, 'render_rate_number_field'],
             'wp-login-guard',
             'wplgngrd_rate_section'
+        );
+
+        // Advanced security section
+        add_settings_section(
+            'wplgngrd_advanced_section',
+            __('Advanced Security', 'wplgngrd'),
+            [$this, 'render_advanced_section_description'],
+            'wp-login-guard'
+        );
+
+        add_settings_field(
+            'wplgngrd_strict_ip',
+            __('Strict IP Binding', 'wplgngrd'),
+            [$this, 'render_strict_ip_field'],
+            'wp-login-guard',
+            'wplgngrd_advanced_section'
+        );
+
+        add_settings_field(
+            'wplgngrd_ip_whitelist',
+            __('Whitelisted IPs', 'wplgngrd'),
+            [$this, 'render_ip_whitelist_field'],
+            'wp-login-guard',
+            'wplgngrd_advanced_section'
         );
     }
 
@@ -916,6 +963,93 @@ class WP_Login_Guard {
                 <li><?php esc_html_e('✓ Auto-logout after inactivity', 'wplgngrd'); ?></li>
             </ul>
         </div>
+        <?php
+    }
+
+    /**
+     * Sanitize IP whitelist
+     */
+    public function sanitize_ip_whitelist($input) {
+        if (empty($input)) {
+            return '';
+        }
+        
+        $ips = explode("\n", $input);
+        $valid_ips = [];
+        
+        foreach ($ips as $ip) {
+            $ip = trim($ip);
+            
+            if (empty($ip)) {
+                continue;
+            }
+            
+            if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                $valid_ips[] = $ip;
+            }
+        }
+        
+        return implode("\n", $valid_ips);
+    }
+
+    /**
+     * Check if IP binding is satisfied
+     */
+    public function check_ip_binding($desktop_ip, $mobile_ip) {
+        $strict_ip = get_option('wplgngrd_strict_ip', false);
+        
+        if (!$strict_ip) {
+            return ['allowed' => true, 'reason' => ''];
+        }
+        
+        $whitelist = get_option('wplgngrd_ip_whitelist', '');
+        $whitelisted_ips = array_filter(array_map('trim', explode("\n", $whitelist)));
+        
+        if (in_array($mobile_ip, $whitelisted_ips)) {
+            return ['allowed' => true, 'reason' => 'whitelisted'];
+        }
+        
+        if ($desktop_ip !== $mobile_ip) {
+            return ['allowed' => true, 'reason' => 'different_ips'];
+        }
+        
+        return [
+            'allowed' => false,
+            'reason' => 'same_ip',
+            'message' => __('Security check failed: Mobile verification must come from a different network. Contact your administrator if you need assistance.', 'wplgngrd')
+        ];
+    }
+
+    public function render_advanced_section_description() {
+        echo '<p>' . esc_html__('Advanced security options for high-security environments.', 'wplgngrd') . '</p>';
+    }
+
+    public function render_strict_ip_field() {
+        $enabled = get_option('wplgngrd_strict_ip', false);
+        ?>
+        <label>
+            <input type="checkbox" name="wplgngrd_strict_ip" value="1" <?php checked($enabled, true); ?> />
+            <?php esc_html_e('Require mobile verification from different IP than desktop', 'wplgngrd'); ?>
+        </label>
+        <p class="description">
+            <?php esc_html_e('When enabled, the mobile device must be on a different network than the desktop. Recommended for high-security environments. Note: This may cause issues if users scan QR codes from the same WiFi network.', 'wplgngrd'); ?>
+        </p>
+        <?php
+    }
+
+    public function render_ip_whitelist_field() {
+        $whitelist = get_option('wplgngrd_ip_whitelist', '');
+        ?>
+        <textarea 
+            name="wplgngrd_ip_whitelist" 
+            rows="5" 
+            cols="50" 
+            class="large-text code"
+            placeholder="203.0.113.5&#10;198.51.100.0"
+        ><?php echo esc_textarea($whitelist); ?></textarea>
+        <p class="description">
+            <?php esc_html_e('Enter one IP address per line. These IPs will bypass the strict IP binding check. Useful for office networks or trusted locations.', 'wplgngrd'); ?>
+        </p>
         <?php
     }
 }
