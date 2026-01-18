@@ -14,6 +14,9 @@ if (!defined('ABSPATH')) {
 // Load Composer autoloader
 require_once plugin_dir_path(__FILE__) . 'vendor/autoload.php';
 
+// Load admin settings page
+require_once plugin_dir_path(__FILE__) . 'admin/settings-page.php';
+
 use Endroid\QrCode\QrCode;
 use Endroid\QrCode\Writer\PngWriter;
 
@@ -464,9 +467,10 @@ class WP_Login_Guard {
         ]);
         
         include plugin_dir_path(__FILE__) . 'templates/mobile-verify.php';
+        exit;
         
-        do_action('login_enqueue_scripts');
-        wp_footer();
+        // do_action('login_enqueue_scripts');
+        // wp_footer();
     }
 
     /**
@@ -672,12 +676,14 @@ class WP_Login_Guard {
      * Add admin menu page
      */
     public function add_admin_menu() {
+        $settings_page = new WP_Login_Guard_Settings($this);
+
         add_options_page(
             __('WP Login Guard Settings', 'wplgngrd'),
             __('Login Guard', 'wplgngrd'),
             'manage_options',
             'wp-login-guard',
-            [$this, 'render_settings_page']
+            [$settings_page, 'render']
         );
     }
 
@@ -909,60 +915,6 @@ class WP_Login_Guard {
         <p class="description">
             <?php esc_html_e('Limits how many wrong number selections can be made across all sessions.', 'wplgngrd'); ?>
         </p>
-        <?php
-    }
-
-    public function render_settings_page() {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-        
-        if (isset($_GET['settings-updated'])) {
-            add_settings_error(
-                'wplgngrd_messages',
-                'wplgngrd_message',
-                __('Settings saved successfully.', 'wplgngrd'),
-                'success'
-            );
-        }
-        
-        settings_errors('wplgngrd_messages');
-        ?>
-        <div class="wrap">
-            <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
-            
-            <form action="options.php" method="post">
-                <?php
-                settings_fields('wplgngrd_settings');
-                do_settings_sections('wp-login-guard');
-                submit_button(__('Save Settings', 'wplgngrd'));
-                ?>
-            </form>
-            
-            <hr>
-            
-            <h2><?php esc_html_e('How it works', 'wplgngrd'); ?></h2>
-            <ol>
-                <li><?php esc_html_e('User visits the login page and sees a QR code', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('User scans QR code with their mobile phone', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('Mobile shows a random 4-digit number', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('User clicks "Continue to Login" on mobile', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('Desktop shows 5 numbers - user selects the correct one', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('User can now log in with their credentials', 'wplgngrd'); ?></li>
-            </ol>
-            
-            <hr>
-            
-            <h2><?php esc_html_e('Security Features', 'wplgngrd'); ?></h2>
-            <ul>
-                <li><?php esc_html_e('✓ Blocks direct POST attacks - bots cannot bypass QR verification', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('✓ 15-minute token expiry prevents replay attacks', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('✓ One-time use tokens - each verification is unique', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('✓ Session-based verification tracking', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('✓ Rate limiting prevents brute-force attacks', 'wplgngrd'); ?></li>
-                <li><?php esc_html_e('✓ Auto-logout after inactivity', 'wplgngrd'); ?></li>
-            </ul>
-        </div>
         <?php
     }
 

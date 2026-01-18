@@ -6,77 +6,161 @@
     <title><?php echo get_bloginfo('name'); ?> &rsaquo; <?php esc_html_e('Mobile Verification', 'wplgngrd'); ?></title>
     <?php wp_head(); ?>
     <style>
-        body {
-            background: #f0f0f1;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+        * {
             margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        html, body {
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             padding: 20px;
         }
+        
         .wplg-mobile-container {
-            max-width: 400px;
-            margin: 50px auto;
             background: white;
-            padding: 40px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            max-width: 420px;
+            width: 100%;
+            border-radius: 20px;
+            padding: 48px 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
             text-align: center;
+            animation: fadeIn 0.4s ease-out;
         }
+        
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        h2 {
+            font-size: 24px;
+            font-weight: 600;
+            color: #1a1a1a;
+            margin-bottom: 8px;
+            letter-spacing: -0.5px;
+        }
+        
+        .wplg-subtitle {
+            font-size: 15px;
+            color: #86868b;
+            margin-bottom: 40px;
+        }
+        
         .wplg-number {
             font-size: 72px;
-            font-weight: bold;
-            color: #2271b1;
-            margin: 30px 0;
-            letter-spacing: 10px;
+            font-weight: 700;
+            color: #667eea;
+            margin: 48px 0;
+            letter-spacing: 12px;
+            text-shadow: 0 2px 10px rgba(102, 126, 234, 0.2);
+            animation: numberPulse 0.5s ease-out;
         }
+        
+        @keyframes numberPulse {
+            0% {
+                transform: scale(0.8);
+                opacity: 0;
+            }
+            100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+        }
+        
         .wplg-instructions {
-            color: #666;
-            font-size: 16px;
-            margin-bottom: 30px;
+            color: #86868b;
+            font-size: 15px;
+            margin-bottom: 40px;
+            line-height: 1.6;
         }
+        
         .wplg-buttons {
             display: flex;
-            gap: 15px;
             flex-direction: column;
+            gap: 12px;
         }
+        
         .wplg-button {
-            padding: 15px 30px;
+            padding: 16px 32px;
             font-size: 16px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
             font-weight: 600;
-            transition: all 0.3s;
+            border: none;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-family: inherit;
         }
+        
         .wplg-button-continue {
-            background: #2271b1;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
         }
+        
         .wplg-button-continue:hover {
-            background: #135e96;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
         }
+        
+        .wplg-button-continue:active {
+            transform: translateY(0);
+        }
+        
         .wplg-button-cancel {
-            background: #dcdcde;
-            color: #50575e;
+            background: #f5f5f7;
+            color: #86868b;
         }
+        
         .wplg-button-cancel:hover {
-            background: #c3c4c7;
+            background: #e8e8ed;
         }
+        
         .wplg-success {
             display: none;
-            color: #00a32a;
-            font-size: 18px;
-            margin-top: 20px;
+            color: #28a745;
+            font-size: 16px;
+            font-weight: 600;
+            margin-top: 24px;
+            padding: 16px;
+            background: #d4edda;
+            border-radius: 12px;
+            animation: fadeIn 0.3s ease-out;
+        }
+        
+        .wplg-success::before {
+            content: "✓ ";
+            font-size: 20px;
         }
     </style>
 </head>
 <body>
     <div class="wplg-mobile-container">
         <h2><?php esc_html_e('Verification Code', 'wplgngrd'); ?></h2>
+        <div class="wplg-subtitle"><?php esc_html_e('Keep this number visible', 'wplgngrd'); ?></div>
         
         <div class="wplg-number"><?php echo esc_html($verification_number); ?></div>
         
         <div class="wplg-instructions">
-            <?php esc_html_e('Remember this number and click Continue to proceed with login on your desktop.', 'wplgngrd'); ?>
+            <?php esc_html_e('Remember this number and tap Continue to proceed with login on your desktop.', 'wplgngrd'); ?>
         </div>
         
         <div class="wplg-buttons">
@@ -112,6 +196,8 @@
                 if (response.ok) {
                     continueBtn.disabled = true;
                     cancelBtn.disabled = true;
+                    continueBtn.style.opacity = '0.5';
+                    cancelBtn.style.opacity = '0.5';
                     successMsg.style.display = 'block';
                 }
             } catch (error) {
